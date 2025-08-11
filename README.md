@@ -26,7 +26,7 @@ Also when it runs it captures all of your inputs , hence while its running, you 
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/WoollyBonsai/Bluetooth-HID-emulator.git
-   cd <repository-directory>
+   cd Bluetooth-HID-emulator
    ```
 
 2. **Install dependencies:**
@@ -145,6 +145,7 @@ Before running the application, you need to specify which keyboard and mouse dev
    - You should see a new device named "HID Emulator".
    - Connect to it, and it should register as a keyboard and mouse.
    - **Note :- "Connect from the client to server ( like dont execute connect in bluetoothctl in server system ), as the program identifies incoming connections , not the outgoings."**
+   - **Also if anything shows permission related errors , just chown things by your user**
 ## How it Works
 
 The C++ application uses the BlueZ D-Bus API to create a virtual HID device. It registers a service record with the HID profile and then listens for incoming connections. Once a device is connected, it can send keyboard and mouse reports over the Bluetooth connection.
