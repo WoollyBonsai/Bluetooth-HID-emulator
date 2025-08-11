@@ -25,7 +25,7 @@ Also when it runs it captures all of your inputs , hence while its running, you 
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/WoollyBonsai/Bluetooth-HID-emulator.git
    cd <repository-directory>
    ```
 
