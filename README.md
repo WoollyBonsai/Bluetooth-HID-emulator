@@ -74,9 +74,9 @@ The `main.conf` file in this directory contains the necessary configuration for 
 - **`FastConnectable = true`**: This enables faster connection times.
 
 The provided `main.conf` file already has these settings. You can to copy it to the correct location or adjust the settings if you have something else configured there.**HIGHLY RECOMMEND MAKING A BACKUP OF ORIGINAL CONFIGS**:
-
-'sudo cp main.conf /etc/bluetooth/main.conf'
-
+```bash
+sudo cp main.conf /etc/bluetooth/main.conf
+```
 ### Configuring Input Device
 
 Before running the application, you need to specify which keyboard and mouse devices the program should capture inputs from. This is done by editing the `bt-hid-emulator-working.cpp` file.
@@ -144,7 +144,7 @@ Before running the application, you need to specify which keyboard and mouse dev
    - On your phone or other device, search for Bluetooth devices.
    - You should see a new device named "HID Emulator".
    - Connect to it, and it should register as a keyboard and mouse.
-   Note :- "Connect from the client to server ( like dont execute connect in bluetoothctl in server system ), as the program identifies incoming connections , not the outgoings."
+   - **Note :- "Connect from the client to server ( like dont execute connect in bluetoothctl in server system ), as the program identifies incoming connections , not the outgoings."**
 ## How it Works
 
 The C++ application uses the BlueZ D-Bus API to create a virtual HID device. It registers a service record with the HID profile and then listens for incoming connections. Once a device is connected, it can send keyboard and mouse reports over the Bluetooth connection.
