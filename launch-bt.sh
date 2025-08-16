@@ -1,6 +1,10 @@
 #!/bin/bash
 # This script prepares the Bluetooth adapter and runs the HID emulator.
-
+echo "Powering the adapter to start the emulation ......"
+sleep 2
+echo "FUCKKKKKKK.............. SHIT JUST GOT IGNITED"
+sleep 3
+echo "All Good"
 echo "Restarting Bluetooth service to ensure a clean state..."
 sudo systemctl restart bluetooth.service
 sleep 1
@@ -25,4 +29,4 @@ echo "Configuration complete."
 echo "Starting the HID emulator..."
 
 # Run the emulator (it will register its own HID profile)
-sudo ./bt-hid-emulator-working
+sudo ./bt-hid-emulator

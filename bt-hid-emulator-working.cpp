@@ -9,6 +9,9 @@
 #include <csignal>
 #include <dirent.h>
 #include <algorithm> // Required for std::min/std::max
+#include <cmath> // Required for round()
+#include <chrono>
+using namespace std::chrono;
 
 #include <linux/input.h>
 #include <sys/ioctl.h>
@@ -67,7 +70,7 @@ struct hidrep_keyb_t {
 char mousebuttons = 0;
 char modifierkeys = 0;
 char pressedkey[8] = { 0, 0, 0, 0,  0, 0, 0, 0 };
-int dx = 0, dy = 0, dz = 0; // Use int for accumulators to prevent overflow
+double dx = 0.0, dy = 0.0, dz = 0.0; // Use double for accumulators to maintain precision
 
 void signal_handler(int signum) {
     std::cout << "\nCaught signal " << signum << ", shutting down." << std::endl;
@@ -212,39 +215,75 @@ void close_event_devices() {
     std::cout << "Released input devices." << std::endl;
 }
 
+
+
 int init_event_devices() {
-    DIR *dir = opendir("/dev/input");
+    // Open and grab selected devices
+    std::cout << "Delaying 2 seconds before grabbing devices..." << std::endl;
+    sleep(2);
+
+    const std::string input_dir = "/dev/input/";
+    DIR *dir = opendir(input_dir.c_str());
     if (!dir) {
-        std::cerr << "Could not open /dev/input" << std::endl;
+        std::cerr << "Could not open /dev/input/. Is this a Linux system?" << std::endl;
         return -1;
     }
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
-        if (strncmp(entry->d_name, "event", 5) == 0) {
-            std::string path = "/dev/input/";
-            path += entry->d_name;
-            
-            int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
-            if (fd < 0) continue;
+        if (strncmp(entry->d_name, "event", 5) != 0) {
+            continue;
+        }
 
+        std::string path = input_dir + entry->d_name;
+        int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+            continue;
+        }
+
+        char name[256] = "Unknown";
+        ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+
+        // Check if the device name contains "keyboard" or "mouse"
+        if (strstr(name, "keyboard") != nullptr || strstr(name, "Keyboard") != nullptr) {
             unsigned long ev_bits = 0;
             ioctl(fd, EVIOCGBIT(0, sizeof(ev_bits)), &ev_bits);
-
-            if ( ((1UL << EV_REL) & ev_bits) || ((1UL << EV_KEY) & ev_bits) ) {
-                 if (ioctl(fd, EVIOCGRAB, 1) == 0) {
+            if ((1UL << EV_KEY) & ev_bits) {
+                if (ioctl(fd, EVIOCGRAB, 1) == 0) {
                     event_fds.push_back(fd);
-                    std::cout << "Grabbed " << path << std::endl;
+                    std::cout << "Grabbed keyboard: " << path << " (" << name << ")" << std::endl;
                 } else {
-                    std::cerr << "Could not grab " << path << ". Are you root?" << std::endl;
+                    std::cerr << "Could not grab keyboard device " << path << ". Are you root?" << std::endl;
                     close(fd);
                 }
             } else {
                 close(fd);
             }
+        } else if (strstr(name, "mouse") != nullptr || strstr(name, "Mouse") != nullptr) {
+            unsigned long ev_bits = 0;
+            ioctl(fd, EVIOCGBIT(0, sizeof(ev_bits)), &ev_bits);
+            if ((1UL << EV_REL) & ev_bits) {
+                if (ioctl(fd, EVIOCGRAB, 1) == 0) {
+                    event_fds.push_back(fd);
+                    std::cout << "Grabbed mouse: " << path << " (" << name << ")" << std::endl;
+                } else {
+                    std::cerr << "Could not grab mouse device " << path << ". Are you root?" << std::endl;
+                    close(fd);
+                }
+            } else {
+                close(fd);
+            }
+        } else {
+            close(fd);
         }
     }
     closedir(dir);
+
+    if (event_fds.empty()) {
+        std::cerr << "No suitable keyboard or mouse found in /dev/input/" << std::endl;
+        return -1;
+    }
+
     return event_fds.size();
 }
 
@@ -349,98 +388,124 @@ unsigned char map_key_to_hid(int code) {
     }
 }
 
-int parse_and_send_events(int int_sock) {
-    struct input_event inevent;
+void process_one_event(struct input_event *inevent) {
     hidrep_mouse_t evmouse;
     hidrep_keyb_t evkeyb;
     int j;
 
-    for (int fd : event_fds) {
-        while (read(fd, &inevent, sizeof(inevent)) > 0) {
-            switch (inevent.type) {
-                case EV_SYN: {
-                    if (dx != 0 || dy != 0 || dz != 0) {
-                        evmouse.btcode = 0xA1;
-                        evmouse.rep_id = REPORTID_MOUSE;
-                        evmouse.button = mousebuttons & 0x07;
-                        evmouse.axis_x = std::max(-127, std::min(127, dx));
-                        evmouse.axis_y = std::max(-127, std::min(127, dy));
-                        evmouse.axis_z = std::max(-127, std::min(127, dz));
-                        if (send(int_sock, &evmouse, sizeof(evmouse), MSG_NOSIGNAL) < 0) return -1;
-                        dx = dy = dz = 0; // Reset accumulators
+    switch (inevent->type) {
+        case EV_KEY: {
+            unsigned int u = 1;
+            switch (inevent->code) {
+                case BTN_LEFT:
+                case BTN_RIGHT:
+                case BTN_MIDDLE: {
+                    char c = 1 << (inevent->code & 0x03);
+                    mousebuttons &= (0x07 - c); 
+                    if (inevent->value == 1) mousebuttons |= c;
+
+                    // --- ADD THIS BLOCK ---
+                    // Send a mouse report immediately to register the click.
+                    // This report has the new button state but zero movement.
+                    hidrep_mouse_t evmouse;
+                    evmouse.btcode = 0xA1;
+                    evmouse.rep_id = REPORTID_MOUSE;
+                    evmouse.button = mousebuttons & 0x07;
+                    evmouse.axis_x = 0;
+                    evmouse.axis_y = 0;
+                    evmouse.axis_z = 0;
+                    if (send(int_conn, &evmouse, sizeof(evmouse), MSG_NOSIGNAL) < 0) {
+                        keep_running = false;
                     }
+                    // --- END OF ADDED BLOCK ---
+
                     break;
                 }
-                case EV_KEY: {
-                    unsigned int u = 1;
-                    switch (inevent.code) {
-                        case BTN_LEFT:
-                        case BTN_RIGHT:
-                        case BTN_MIDDLE: {
-                            char c = 1 << (inevent.code & 0x03);
-                            mousebuttons &= (0x07 - c);
-                            if (inevent.value == 1) mousebuttons |= c;
-                            
-                            evmouse.btcode = 0xA1;
-                            evmouse.rep_id = REPORTID_MOUSE;
-                            evmouse.button = mousebuttons & 0x07;
-                            evmouse.axis_x = evmouse.axis_y = evmouse.axis_z = 0;
-                            
-                            if (send(int_sock, &evmouse, sizeof(evmouse), MSG_NOSIGNAL) < 0) return -1;
-                            break;
-                        }
-                        case KEY_RIGHTMETA: u <<= 1;
-                        case KEY_RIGHTALT: u <<= 1;
-                        case KEY_RIGHTSHIFT: u <<= 1;
-                        case KEY_RIGHTCTRL: u <<= 1;
-                        case KEY_LEFTMETA: u <<= 1;
-                        case KEY_LEFTALT: u <<= 1;
-                        case KEY_LEFTSHIFT: u <<= 1;
-                        case KEY_LEFTCTRL: {
-                            modifierkeys &= (0xff - u);
-                            if (inevent.value >= 1) modifierkeys |= u;
-                            // Send a keyboard report to reflect modifier change immediately
-                            evkeyb.btcode = 0xA1;
-                            evkeyb.rep_id = REPORTID_KEYBD;
-                            memcpy(evkeyb.key, pressedkey, 8);
-                            evkeyb.modify = modifierkeys;
-                            if (send(int_sock, &evkeyb, sizeof(evkeyb), MSG_NOSIGNAL) < 0) return -1;
-                            break;
-                        }
-                        default: {
-                            unsigned char hid_code = map_key_to_hid(inevent.code);
-                            if (hid_code != 0) {
-                                if (inevent.value == 1) { // Key Down
-                                    for (j = 0; j < 8; ++j) if (pressedkey[j] == 0) { pressedkey[j] = hid_code; break; }
-                                } else if (inevent.value == 0) { // Key Up
-                                    for (j = 0; j < 8; ++j) if (pressedkey[j] == hid_code) {
-                                        for (int k = j; k < 7; ++k) pressedkey[k] = pressedkey[k+1];
-                                        pressedkey[7] = 0;
-                                        break;
-                                    }
-                                }
+                case KEY_RIGHTMETA: u <<= 1;
+                case KEY_RIGHTALT: u <<= 1;
+                case KEY_RIGHTSHIFT: u <<= 1;
+                case KEY_RIGHTCTRL: u <<= 1;
+                case KEY_LEFTMETA: u <<= 1;
+                case KEY_LEFTALT: u <<= 1;
+                case KEY_LEFTSHIFT: u <<= 1;
+                case KEY_LEFTCTRL: {
+                    modifierkeys &= (0xff - u);
+                    if (inevent->value >= 1) modifierkeys |= u;
+                    evkeyb.btcode = 0xA1;
+                    evkeyb.rep_id = REPORTID_KEYBD;
+                    memcpy(evkeyb.key, pressedkey, 8);
+                    evkeyb.modify = modifierkeys;
+                    if (send(int_conn, &evkeyb, sizeof(evkeyb), MSG_NOSIGNAL) < 0) keep_running = false;
+                    break;
+                }
+                default: {
+                    unsigned char hid_code = map_key_to_hid(inevent->code);
+                    if (hid_code != 0) {
+                        if (inevent->value == 1) { // Key Down
+                            for (j = 0; j < 8; ++j) if (pressedkey[j] == 0) { pressedkey[j] = hid_code; break; }
+                        } else if (inevent->value == 0) { // Key Up
+                            for (j = 0; j < 8; ++j) if (pressedkey[j] == hid_code) {
+                                for (int k = j; k < 7; ++k) pressedkey[k] = pressedkey[k+1];
+                                pressedkey[7] = 0;
+                                break;
                             }
-                            
-                            evkeyb.btcode = 0xA1;
-                            evkeyb.rep_id = REPORTID_KEYBD;
-                            memcpy(evkeyb.key, pressedkey, 8);
-                            evkeyb.modify = modifierkeys;
-                            if (send(int_sock, &evkeyb, sizeof(evkeyb), MSG_NOSIGNAL) < 0) return -1;
-                            break;
                         }
                     }
-                    break;
-                }
-                case EV_REL: {
-                    if (inevent.code == REL_X) dx += inevent.value;
-                    if (inevent.code == REL_Y) dy += inevent.value;
-                    if (inevent.code == REL_WHEEL) dz += inevent.value;
+                    
+                    evkeyb.btcode = 0xA1;
+                    evkeyb.rep_id = REPORTID_KEYBD;
+                    memcpy(evkeyb.key, pressedkey, 8);
+                    evkeyb.modify = modifierkeys;
+                    if (send(int_conn, &evkeyb, sizeof(evkeyb), MSG_NOSIGNAL) < 0) keep_running = false;
                     break;
                 }
             }
+            break;
+        }
+        case EV_REL: {
+            if (inevent->code == REL_X) dx += inevent->value;
+            if (inevent->code == REL_Y) dy += inevent->value;
+            if (inevent->code == REL_WHEEL) dz += inevent->value;
+            break;
         }
     }
-    return 0;
+}
+
+void send_pending_reports(int int_sock) {
+    hidrep_mouse_t evmouse;
+    evmouse.btcode = 0xA1;
+    evmouse.rep_id = REPORTID_MOUSE;
+    evmouse.button = mousebuttons & 0x07;
+
+    // Loop to send multiple reports if accumulated movement is large
+    // Continue as long as there's significant movement remaining
+    while (abs(dx) >= 1.0 || abs(dy) >= 1.0 || abs(dz) >= 1.0) {
+        // Calculate the payload for this report, clamping to signed char limits
+        signed char report_payload_x = static_cast<signed char>(std::max(-127.0, std::min(127.0, floor(dx))));
+        signed char report_payload_y = static_cast<signed char>(std::max(-127.0, std::min(127.0, floor(dy))));
+        signed char report_payload_z = static_cast<signed char>(std::max(-127.0, std::min(127.0, floor(dz))));
+
+        // If all payloads are zero, but there's still accumulated movement,
+        // it means the remaining movement is sub-pixel and less than 0.5.
+        // In this case, we break to avoid an infinite loop.
+        if (report_payload_x == 0 && report_payload_y == 0 && report_payload_z == 0) {
+            break;
+        }
+
+        evmouse.axis_x = report_payload_x;
+        evmouse.axis_y = report_payload_y;
+        evmouse.axis_z = report_payload_z;
+
+        if (send(int_sock, &evmouse, sizeof(evmouse), MSG_NOSIGNAL) < 0) {
+            keep_running = false;
+            return; // Exit if send fails
+        }
+
+        // Subtract the sent values from the accumulators
+        dx -= report_payload_x;
+        dy -= report_payload_y;
+        dz -= report_payload_z;
+    }
 }
 
 int main() {
@@ -484,6 +549,9 @@ int main() {
     }
     std::cout << "Waiting for connections..." << std::endl;
 
+    auto last_report_time = steady_clock::now();
+    const milliseconds report_interval(2); // For 500Hz, use 1 for 1000Hz
+
     while (keep_running) {
         struct sockaddr_l2 rem_addr = { 0 };
         socklen_t opt = sizeof(rem_addr);
@@ -522,21 +590,30 @@ int main() {
             fds[event_fds.size() + 1].fd = int_conn;
             fds[event_fds.size() + 1].events = POLLIN;
 
-            int ret = poll(fds, event_fds.size() + 2, -1);
+            int ret = poll(fds, event_fds.size() + 2, 1); // Reduced timeout for smoother mouse
             if (ret < 0) { if (errno == EINTR) continue; break; }
 
-            bool connection_lost = false;
-            if (fds[event_fds.size()].revents & (POLLHUP | POLLERR) || fds[event_fds.size() + 1].revents & (POLLHUP | POLLERR)) {
-                connection_lost = true;
-            } else {
-                 if (parse_and_send_events(int_conn) < 0) {
-                    connection_lost = true;
-                 }
+            for (size_t i = 0; i < event_fds.size(); ++i) {
+                if (fds[i].revents & POLLIN) {
+                    struct input_event inevent;
+                    if (read(fds[i].fd, &inevent, sizeof(inevent)) > 0) {
+                        process_one_event(&inevent);
+                    }
+                }
             }
 
-            if (connection_lost) {
+            
+
+            if (fds[event_fds.size()].revents & (POLLHUP | POLLERR) || fds[event_fds.size() + 1].revents & (POLLHUP | POLLERR)) {
                 std::cout << "Connection lost." << std::endl;
                 break;
+            }
+
+            // NEW: Timer-based report sending logic
+            auto current_time = steady_clock::now();
+            if (duration_cast<milliseconds>(current_time - last_report_time) >= report_interval) {
+                send_pending_reports(int_conn);
+                last_report_time = current_time;
             }
         }
 
