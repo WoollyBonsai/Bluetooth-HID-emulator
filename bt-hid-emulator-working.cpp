@@ -550,7 +550,7 @@ int main() {
     std::cout << "Waiting for connections..." << std::endl;
 
     auto last_report_time = steady_clock::now();
-    const milliseconds report_interval(2); // For 500Hz, use 1 for 1000Hz
+    const milliseconds report_interval(1); // For 500Hz, use 1 for 1000Hz
 
     while (keep_running) {
         struct sockaddr_l2 rem_addr = { 0 };
