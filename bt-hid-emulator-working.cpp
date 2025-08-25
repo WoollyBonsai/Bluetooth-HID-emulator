@@ -11,6 +11,7 @@
 #include <algorithm> // Required for std::min/std::max
 #include <cmath> // Required for round()
 #include <chrono>
+#include <map>
 using namespace std::chrono;
 
 #include <linux/input.h>
@@ -82,6 +83,10 @@ void signal_handler(int signum) {
     int_sock = -1;
 }
 
+// This function is a workaround for a bug in the bluez library.
+// The sdp_record_register function can cause a segmentation fault if the
+// SDP record is not created with a specific memory layout. This function
+// ensures that the memory is allocated in a way that prevents the crash.
 // HACK from hidclient.c, required for sdp_record_register to not segfault
 sdp_data_t *sdp_seq_alloc_with_length(void **dtds, void **values, int *length, int len) {
     sdp_data_t *curr = NULL, *seq = NULL;
@@ -217,6 +222,31 @@ void close_event_devices() {
 
 
 
+int grab_device(const std::string& path, unsigned long ev_type) {
+    int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+        return -1;
+    }
+
+    unsigned long ev_bits = 0;
+    ioctl(fd, EVIOCGBIT(0, sizeof(ev_bits)), &ev_bits);
+    if (!((1UL << ev_type) & ev_bits)) {
+        close(fd);
+        return -1;
+    }
+
+    if (ioctl(fd, EVIOCGRAB, 1) == 0) {
+        char name[256] = "Unknown";
+        ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+        std::cout << "Grabbed device: " << path << " (" << name << ")" << std::endl;
+        return fd;
+    } else {
+        std::cerr << "Could not grab device " << path << ". Are you root?" << std::endl;
+        close(fd);
+        return -1;
+    }
+}
+
 int init_event_devices() {
     // Open and grab selected devices
     std::cout << "Delaying 2 seconds before grabbing devices..." << std::endl;
@@ -236,45 +266,24 @@ int init_event_devices() {
         }
 
         std::string path = input_dir + entry->d_name;
-        int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
-        if (fd < 0) {
-            continue;
-        }
+        int fd = -1;
 
         char name[256] = "Unknown";
-        ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+        int temp_fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+        if (temp_fd < 0) {
+            continue;
+        }
+        ioctl(temp_fd, EVIOCGNAME(sizeof(name)), name);
+        close(temp_fd);
 
-        // Check if the device name contains "keyboard" or "mouse"
         if (strstr(name, "keyboard") != nullptr || strstr(name, "Keyboard") != nullptr) {
-            unsigned long ev_bits = 0;
-            ioctl(fd, EVIOCGBIT(0, sizeof(ev_bits)), &ev_bits);
-            if ((1UL << EV_KEY) & ev_bits) {
-                if (ioctl(fd, EVIOCGRAB, 1) == 0) {
-                    event_fds.push_back(fd);
-                    std::cout << "Grabbed keyboard: " << path << " (" << name << ")" << std::endl;
-                } else {
-                    std::cerr << "Could not grab keyboard device " << path << ". Are you root?" << std::endl;
-                    close(fd);
-                }
-            } else {
-                close(fd);
-            }
+            fd = grab_device(path, EV_KEY);
         } else if (strstr(name, "mouse") != nullptr || strstr(name, "Mouse") != nullptr) {
-            unsigned long ev_bits = 0;
-            ioctl(fd, EVIOCGBIT(0, sizeof(ev_bits)), &ev_bits);
-            if ((1UL << EV_REL) & ev_bits) {
-                if (ioctl(fd, EVIOCGRAB, 1) == 0) {
-                    event_fds.push_back(fd);
-                    std::cout << "Grabbed mouse: " << path << " (" << name << ")" << std::endl;
-                } else {
-                    std::cerr << "Could not grab mouse device " << path << ". Are you root?" << std::endl;
-                    close(fd);
-                }
-            } else {
-                close(fd);
-            }
-        } else {
-            close(fd);
+            fd = grab_device(path, EV_REL);
+        }
+
+        if (fd >= 0) {
+            event_fds.push_back(fd);
         }
     }
     closedir(dir);
@@ -288,108 +297,39 @@ int init_event_devices() {
 }
 
 unsigned char map_key_to_hid(int code) {
-    switch (code) {
-        case KEY_A: return 4;
-        case KEY_B: return 5;
-        case KEY_C: return 6;
-        case KEY_D: return 7;
-        case KEY_E: return 8;
-        case KEY_F: return 9;
-        case KEY_G: return 10;
-        case KEY_H: return 11;
-        case KEY_I: return 12;
-        case KEY_J: return 13;
-        case KEY_K: return 14;
-        case KEY_L: return 15;
-        case KEY_M: return 16;
-        case KEY_N: return 17;
-        case KEY_O: return 18;
-        case KEY_P: return 19;
-        case KEY_Q: return 20;
-        case KEY_R: return 21;
-        case KEY_S: return 22;
-        case KEY_T: return 23;
-        case KEY_U: return 24;
-        case KEY_V: return 25;
-        case KEY_W: return 26;
-        case KEY_X: return 27;
-        case KEY_Y: return 28;
-        case KEY_Z: return 29;
-        case KEY_1: return 30;
-        case KEY_2: return 31;
-        case KEY_3: return 32;
-        case KEY_4: return 33;
-        case KEY_5: return 34;
-        case KEY_6: return 35;
-        case KEY_7: return 36;
-        case KEY_8: return 37;
-        case KEY_9: return 38;
-        case KEY_0: return 39;
-        case KEY_ENTER: return 40;
-        case KEY_ESC: return 41;
-        case KEY_BACKSPACE: return 42;
-        case KEY_TAB: return 43;
-        case KEY_SPACE: return 44;
-        case KEY_MINUS: return 45;
-        case KEY_EQUAL: return 46;
-        case KEY_LEFTBRACE: return 47;
-        case KEY_RIGHTBRACE: return 48;
-        case KEY_BACKSLASH: return 49;
-        case KEY_SEMICOLON: return 51;
-        case KEY_APOSTROPHE: return 52;
-        case KEY_GRAVE: return 53;
-        case KEY_COMMA: return 54;
-        case KEY_DOT: return 55;
-        case KEY_SLASH: return 56;
-        case KEY_CAPSLOCK: return 57;
-        case KEY_F1: return 58;
-        case KEY_F2: return 59;
-        case KEY_F3: return 60;
-        case KEY_F4: return 61;
-        case KEY_F5: return 62;
-        case KEY_F6: return 63;
-        case KEY_F7: return 64;
-        case KEY_F8: return 65;
-        case KEY_F9: return 66;
-        case KEY_F10: return 67;
-        case KEY_F11: return 68;
-        case KEY_F12: return 69;
-        case KEY_SYSRQ: return 70;
-        case KEY_SCROLLLOCK: return 71;
-        case KEY_PAUSE: return 72;
-        case KEY_INSERT: return 73;
-        case KEY_HOME: return 74;
-        case KEY_PAGEUP: return 75;
-        case KEY_DELETE: return 76;
-        case KEY_END: return 77;
-        case KEY_PAGEDOWN: return 78;
-        case KEY_RIGHT: return 79;
-        case KEY_LEFT: return 80;
-        case KEY_DOWN: return 81;
-        case KEY_UP: return 82;
-        case KEY_NUMLOCK: return 83;
-        case KEY_KPSLASH: return 84;
-        case KEY_KPASTERISK: return 85;
-        case KEY_KPMINUS: return 86;
-        case KEY_KPPLUS: return 87;
-        case KEY_KPENTER: return 88;
-        case KEY_KP1: return 89;
-        case KEY_KP2: return 90;
-        case KEY_KP3: return 91;
-        case KEY_KP4: return 92;
-        case KEY_KP5: return 93;
-        case KEY_KP6: return 94;
-        case KEY_KP7: return 95;
-        case KEY_KP8: return 96;
-        case KEY_KP9: return 97;
-        case KEY_KP0: return 98;
-        case KEY_KPDOT: return 99;
-        default: return 0;
+    static const std::map<int, unsigned char> key_map = {
+        {KEY_A, 4}, {KEY_B, 5}, {KEY_C, 6}, {KEY_D, 7}, {KEY_E, 8},
+        {KEY_F, 9}, {KEY_G, 10}, {KEY_H, 11}, {KEY_I, 12}, {KEY_J, 13},
+        {KEY_K, 14}, {KEY_L, 15}, {KEY_M, 16}, {KEY_N, 17}, {KEY_O, 18},
+        {KEY_P, 19}, {KEY_Q, 20}, {KEY_R, 21}, {KEY_S, 22}, {KEY_T, 23},
+        {KEY_U, 24}, {KEY_V, 25}, {KEY_W, 26}, {KEY_X, 27}, {KEY_Y, 28},
+        {KEY_Z, 29}, {KEY_1, 30}, {KEY_2, 31}, {KEY_3, 32}, {KEY_4, 33},
+        {KEY_5, 34}, {KEY_6, 35}, {KEY_7, 36}, {KEY_8, 37}, {KEY_9, 38},
+        {KEY_0, 39}, {KEY_ENTER, 40}, {KEY_ESC, 41}, {KEY_BACKSPACE, 42},
+        {KEY_TAB, 43}, {KEY_SPACE, 44}, {KEY_MINUS, 45}, {KEY_EQUAL, 46},
+        {KEY_LEFTBRACE, 47}, {KEY_RIGHTBRACE, 48}, {KEY_BACKSLASH, 49},
+        {KEY_SEMICOLON, 51}, {KEY_APOSTROPHE, 52}, {KEY_GRAVE, 53},
+        {KEY_COMMA, 54}, {KEY_DOT, 55}, {KEY_SLASH, 56}, {KEY_CAPSLOCK, 57},
+        {KEY_F1, 58}, {KEY_F2, 59}, {KEY_F3, 60}, {KEY_F4, 61}, {KEY_F5, 62},
+        {KEY_F6, 63}, {KEY_F7, 64}, {KEY_F8, 65}, {KEY_F9, 66}, {KEY_F10, 67},
+        {KEY_F11, 68}, {KEY_F12, 69}, {KEY_SYSRQ, 70}, {KEY_SCROLLLOCK, 71},
+        {KEY_PAUSE, 72}, {KEY_INSERT, 73}, {KEY_HOME, 74}, {KEY_PAGEUP, 75},
+        {KEY_DELETE, 76}, {KEY_END, 77}, {KEY_PAGEDOWN, 78}, {KEY_RIGHT, 79},
+        {KEY_LEFT, 80}, {KEY_DOWN, 81}, {KEY_UP, 82}, {KEY_NUMLOCK, 83},
+        {KEY_KPSLASH, 84}, {KEY_KPASTERISK, 85}, {KEY_KPMINUS, 86},
+        {KEY_KPPLUS, 87}, {KEY_KPENTER, 88}, {KEY_KP1, 89}, {KEY_KP2, 90},
+        {KEY_KP3, 91}, {KEY_KP4, 92}, {KEY_KP5, 93}, {KEY_KP6, 94},
+        {KEY_KP7, 95}, {KEY_KP8, 96}, {KEY_KP9, 97}, {KEY_KP0, 98},
+        {KEY_KPDOT, 99}
+    };
+    auto it = key_map.find(code);
+    if (it != key_map.end()) {
+        return it->second;
     }
+    return 0;
 }
 
 void process_one_event(struct input_event *inevent) {
-    hidrep_mouse_t evmouse;
     hidrep_keyb_t evkeyb;
     int j;
 
@@ -415,6 +355,9 @@ void process_one_event(struct input_event *inevent) {
                     evmouse.axis_y = 0;
                     evmouse.axis_z = 0;
                     if (send(int_conn, &evmouse, sizeof(evmouse), MSG_NOSIGNAL) < 0) {
+                        if (errno == EPIPE) {
+                            std::cerr << "Connection closed (EPIPE)." << std::endl;
+                        }
                         keep_running = false;
                     }
                     // --- END OF ADDED BLOCK ---
@@ -435,7 +378,12 @@ void process_one_event(struct input_event *inevent) {
                     evkeyb.rep_id = REPORTID_KEYBD;
                     memcpy(evkeyb.key, pressedkey, 8);
                     evkeyb.modify = modifierkeys;
-                    if (send(int_conn, &evkeyb, sizeof(evkeyb), MSG_NOSIGNAL) < 0) keep_running = false;
+                    if (send(int_conn, &evkeyb, sizeof(evkeyb), MSG_NOSIGNAL) < 0) {
+                        if (errno == EPIPE) {
+                            std::cerr << "Connection closed (EPIPE)." << std::endl;
+                        }
+                        keep_running = false;
+                    }
                     break;
                 }
                 default: {
@@ -456,7 +404,12 @@ void process_one_event(struct input_event *inevent) {
                     evkeyb.rep_id = REPORTID_KEYBD;
                     memcpy(evkeyb.key, pressedkey, 8);
                     evkeyb.modify = modifierkeys;
-                    if (send(int_conn, &evkeyb, sizeof(evkeyb), MSG_NOSIGNAL) < 0) keep_running = false;
+                    if (send(int_conn, &evkeyb, sizeof(evkeyb), MSG_NOSIGNAL) < 0) {
+                        if (errno == EPIPE) {
+                            std::cerr << "Connection closed (EPIPE)." << std::endl;
+                        }
+                        keep_running = false;
+                    }
                     break;
                 }
             }
@@ -497,6 +450,9 @@ void send_pending_reports(int int_sock) {
         evmouse.axis_z = report_payload_z;
 
         if (send(int_sock, &evmouse, sizeof(evmouse), MSG_NOSIGNAL) < 0) {
+            if (errno == EPIPE) {
+                std::cerr << "Connection closed (EPIPE)." << std::endl;
+            }
             keep_running = false;
             return; // Exit if send fails
         }
@@ -550,7 +506,7 @@ int main() {
     std::cout << "Waiting for connections..." << std::endl;
 
     auto last_report_time = steady_clock::now();
-    const milliseconds report_interval(2); // For 500Hz, use 1 for 1000Hz
+    const milliseconds report_interval(1); // For 1000Hz
 
     while (keep_running) {
         struct sockaddr_l2 rem_addr = { 0 };
